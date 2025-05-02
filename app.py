@@ -1,92 +1,92 @@
-# ... (importaciones y configuración previas sin cambios)
+import streamlit as st
+import cv2
+import numpy as np
+import pandas as pd
+import torch
+import os
+from PIL import Image
 
-# Función para agregar etiquetas a la imagen detectada
-def draw_labels_on_image(image, predictions, labels, scores, threshold=0.25):
-    for i in range(len(predictions)):
-        if scores[i] >= threshold:
-            box = predictions[i][:4].int()
-            label = labels[i]
-            conf = scores[i]
-            cv2.rectangle(image, (box[0], box[1]), (box[2], box[3]), (0, 255, 0), 2)
-            cv2.putText(image, f"{label} {conf:.2f}", (box[0], box[1] - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-    return image
+# Configuración de página
+st.set_page_config(
+    page_title="Detección de Objetos YOLOv5",
+    page_icon="🔍",
+    layout="wide"
+)
 
-# Sidebar adicional
-with st.sidebar:
-    st.subheader("🔍 Opciones de visualización")
-    show_labels = st.checkbox("Mostrar etiquetas en imagen", True)
-    export_csv = st.checkbox("Exportar detecciones en CSV", False)
-    st.subheader("🎨 Tema")
-    theme = st.selectbox("Seleccionar tema", ["Claro", "Oscuro"])
+# Función para cargar el modelo YOLOv5
+@st.cache_resource
+def load_model():
+    model = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=True)
+    return model
 
-    if theme == "Oscuro":
-        st.markdown(
-            """
-            <style>
-                body { background-color: #111; color: #fff; }
-            </style>
-            """,
-            unsafe_allow_html=True
-        )
+model = load_model()
 
-# ... (elección de imagen como antes)
+# Sidebar - configuración
+st.sidebar.title("🔧 Parámetros de Detección")
+conf_thres = st.sidebar.slider("Confianza mínima", 0.0, 1.0, 0.25, 0.01)
+iou_thres = st.sidebar.slider("IoU mínimo", 0.0, 1.0, 0.45, 0.01)
+max_det = st.sidebar.slider("Máx. detecciones", 10, 1000, 300, 10)
+show_labels = st.sidebar.checkbox("Mostrar etiquetas", True)
+export_csv = st.sidebar.checkbox("Exportar resultados CSV", False)
 
-if image is not None:
+# Sidebar - subir imagen
+uploaded_image = st.sidebar.file_uploader("📷 Subir imagen", type=["jpg", "jpeg", "png"])
+
+# Título
+st.title("🔍 Detección de Objetos en Imágenes con YOLOv5")
+
+if uploaded_image is not None:
+    file_bytes = np.asarray(bytearray(uploaded_image.read()), dtype=np.uint8)
+    image = cv2.imdecode(file_bytes, 1)
+
+    # Realizar inferencia
+    model.conf = conf_thres
+    model.iou = iou_thres
+    model.max_det = max_det
+
     with st.spinner("Detectando objetos..."):
         results = model(image)
+        df = results.pandas().xyxy[0]
 
-    predictions = results.pred[0]
-    boxes = predictions[:, :4].cpu()
-    scores = predictions[:, 4].cpu()
-    categories = predictions[:, 5].cpu().int()
-    label_names = model.names
+    st.subheader("🖼 Imagen Original")
+    st.image(image, channels="BGR", use_column_width=True)
 
-    labels = [label_names[i] for i in categories]
+    if not df.empty:
+        # Dibujar etiquetas si está activado
+        annotated_image = image.copy()
+        if show_labels:
+            for _, row in df.iterrows():
+                x1, y1, x2, y2 = map(int, [row['xmin'], row['ymin'], row['xmax'], row['ymax']])
+                label = f"{row['name']} {row['confidence']:.2f}"
+                cv2.rectangle(annotated_image, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                cv2.putText(annotated_image, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2)
 
-    # Filtro por clase
-    unique_classes = list(set(labels))
-    selected_classes = st.multiselect("Filtrar clases detectadas", unique_classes, default=unique_classes)
+        # Mostrar imagen con anotaciones
+        st.subheader("📍 Imagen con Detecciones")
+        st.image(annotated_image, channels="BGR", use_column_width=True)
 
-    # Filtrar predicciones por clase seleccionada
-    indices = [i for i, label in enumerate(labels) if label in selected_classes]
-    filtered_boxes = boxes[indices]
-    filtered_scores = scores[indices]
-    filtered_labels = [labels[i] for i in indices]
+        # Descargar imagen anotada
+        retval, buffer = cv2.imencode('.jpg', annotated_image)
+        st.download_button("📥 Descargar imagen detectada", buffer.tobytes(), "deteccion.jpg", "image/jpeg")
 
-    if show_labels:
-        annotated_img = draw_labels_on_image(image.copy(), filtered_boxes, filtered_labels, filtered_scores)
-    else:
-        annotated_img = image
+        # Mostrar tabla de resultados
+        st.subheader("📋 Resultados de Detección")
+        df_show = df[["name", "confidence"]].groupby("name").agg(["count", "mean"])
+        df_show.columns = ["Cantidad", "Confianza Prom."]
+        st.dataframe(df_show)
 
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.image(annotated_img, channels='BGR', caption="Resultado con anotaciones")
-
-        # Opción de descarga
-        retval, buffer = cv2.imencode('.jpg', annotated_img)
-        st.download_button("📥 Descargar imagen con anotaciones", buffer.tobytes(), file_name="resultado.jpg", mime="image/jpeg")
-
-    with col2:
-        st.subheader("📊 Detalles de detección")
-        df_data = []
-        for i, label in enumerate(filtered_labels):
-            df_data.append({
-                "Etiqueta": label,
-                "Confianza": f"{filtered_scores[i]:.2f}"
-            })
-
-        df = pd.DataFrame(df_data)
-        st.dataframe(df, use_container_width=True)
-
+        # Exportar CSV
         if export_csv:
-            csv = df.to_csv(index=False).encode("utf-8")
-            st.download_button("📤 Exportar CSV", csv, file_name="detecciones.csv", mime="text/csv")
+            csv = df.to_csv(index=False).encode('utf-8')
+            st.download_button("📤 Descargar CSV", csv, "resultados.csv", "text/csv")
 
-        # Histograma de confianza
-        st.bar_chart(df["Confianza"].astype(float))
+        # Gráfico de barras
+        st.bar_chart(df['name'].value_counts())
+    else:
+        st.info("No se detectaron objetos con los parámetros actuales.")
+else:
+    st.info("Por favor, sube una imagen desde la barra lateral para comenzar.")
 
-# Footer
+# Pie de página
 st.markdown("---")
-st.caption("Desarrollado por [Tu Nombre] • YOLOv5 + Streamlit • 2025")
+st.caption("Aplicación creada con ❤️ usando Streamlit y YOLOv5 (PyTorch Hub)")
