@@ -1,144 +1,92 @@
-import cv2
-import streamlit as st
-import numpy as np
-import pandas as pd
-import torch
-import os
-import sys
+# ... (importaciones y configuración previas sin cambios)
 
-# Configuración de página Streamlit
-st.set_page_config(
-    page_title="Detección de Objetos en Tiempo Real",
-    page_icon="🔍",
-    layout="wide"
-)
+# Función para agregar etiquetas a la imagen detectada
+def draw_labels_on_image(image, predictions, labels, scores, threshold=0.25):
+    for i in range(len(predictions)):
+        if scores[i] >= threshold:
+            box = predictions[i][:4].int()
+            label = labels[i]
+            conf = scores[i]
+            cv2.rectangle(image, (box[0], box[1]), (box[2], box[3]), (0, 255, 0), 2)
+            cv2.putText(image, f"{label} {conf:.2f}", (box[0], box[1] - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+    return image
 
-# Función para cargar el modelo YOLOv5
-@st.cache_resource
-def load_yolov5_model(model_path='yolov5s.pt'):
-    try:
-        import yolov5
-        try:
-            model = yolov5.load(model_path, weights_only=False)
-            return model
-        except TypeError:
-            try:
-                model = yolov5.load(model_path)
-                return model
-            except Exception:
-                st.warning("Intentando método alternativo de carga...")
-                current_dir = os.path.dirname(os.path.abspath(__file__))
-                if current_dir not in sys.path:
-                    sys.path.append(current_dir)
-                device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-                model = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=True)
-                return model
-    except Exception as e:
-        st.error(f"❌ Error al cargar el modelo: {str(e)}")
-        return None
+# Sidebar adicional
+with st.sidebar:
+    st.subheader("🔍 Opciones de visualización")
+    show_labels = st.checkbox("Mostrar etiquetas en imagen", True)
+    export_csv = st.checkbox("Exportar detecciones en CSV", False)
+    st.subheader("🎨 Tema")
+    theme = st.selectbox("Seleccionar tema", ["Claro", "Oscuro"])
 
-# Título y descripción
-st.title("🔍 Detección de Objetos en Imágenes")
-st.markdown("""
-Esta aplicación utiliza YOLOv5 para detectar objetos en imágenes capturadas con tu cámara o subidas desde tu dispositivo.
-""")
+    if theme == "Oscuro":
+        st.markdown(
+            """
+            <style>
+                body { background-color: #111; color: #fff; }
+            </style>
+            """,
+            unsafe_allow_html=True
+        )
 
-# Cargar modelo
-with st.spinner("Cargando modelo YOLOv5..."):
-    model = load_yolov5_model()
+# ... (elección de imagen como antes)
 
-if model:
-    st.sidebar.title("Parámetros")
-    
-    with st.sidebar:
-        st.subheader('Configuración de detección')
-        model.conf = st.slider('Confianza mínima', 0.0, 1.0, 0.25, 0.01)
-        model.iou = st.slider('Umbral IoU', 0.0, 1.0, 0.45, 0.01)
-        st.caption(f"Confianza: {model.conf:.2f} | IoU: {model.iou:.2f}")
-        
-        st.subheader('Opciones avanzadas')
-        try:
-            model.agnostic = st.checkbox('NMS class-agnostic', False)
-            model.multi_label = st.checkbox('Múltiples etiquetas por caja', False)
-            model.max_det = st.number_input('Detecciones máximas', 10, 2000, 1000, 10)
-        except:
-            st.warning("Algunas opciones avanzadas no están disponibles con esta configuración")
-        
-    # Método de entrada: cámara o archivo
-    st.sidebar.subheader("Fuente de imagen")
-    input_method = st.sidebar.radio("Selecciona fuente de imagen:", ["📷 Cámara", "🖼️ Archivo"])
+if image is not None:
+    with st.spinner("Detectando objetos..."):
+        results = model(image)
 
-    image = None
-    main_container = st.container()
+    predictions = results.pred[0]
+    boxes = predictions[:, :4].cpu()
+    scores = predictions[:, 4].cpu()
+    categories = predictions[:, 5].cpu().int()
+    label_names = model.names
 
-    with main_container:
-        if input_method == "📷 Cámara":
-            picture = st.camera_input("Captura una imagen con tu cámara")
-            if picture:
-                bytes_data = picture.getvalue()
-                image = cv2.imdecode(np.frombuffer(bytes_data, np.uint8), cv2.IMREAD_COLOR)
-        else:
-            uploaded_file = st.file_uploader("Sube una imagen", type=["jpg", "jpeg", "png"])
-            if uploaded_file:
-                bytes_data = uploaded_file.read()
-                image = cv2.imdecode(np.frombuffer(bytes_data, np.uint8), cv2.IMREAD_COLOR)
+    labels = [label_names[i] for i in categories]
 
-        if image is not None:
-            with st.spinner("Detectando objetos..."):
-                try:
-                    results = model(image)
-                except Exception as e:
-                    st.error(f"Error durante la detección: {str(e)}")
-                    st.stop()
+    # Filtro por clase
+    unique_classes = list(set(labels))
+    selected_classes = st.multiselect("Filtrar clases detectadas", unique_classes, default=unique_classes)
 
-            try:
-                predictions = results.pred[0]
-                boxes = predictions[:, :4]
-                scores = predictions[:, 4]
-                categories = predictions[:, 5]
+    # Filtrar predicciones por clase seleccionada
+    indices = [i for i, label in enumerate(labels) if label in selected_classes]
+    filtered_boxes = boxes[indices]
+    filtered_scores = scores[indices]
+    filtered_labels = [labels[i] for i in indices]
 
-                col1, col2 = st.columns(2)
+    if show_labels:
+        annotated_img = draw_labels_on_image(image.copy(), filtered_boxes, filtered_labels, filtered_scores)
+    else:
+        annotated_img = image
 
-                with col1:
-                    st.subheader("Imagen con detecciones")
-                    results.render()
-                    st.image(image, channels='BGR', use_column_width=True)
+    col1, col2 = st.columns(2)
 
-                with col2:
-                    st.subheader("Objetos detectados")
-                    label_names = model.names
-                    category_count = {}
-                    for category in categories:
-                        category_idx = int(category.item()) if hasattr(category, 'item') else int(category)
-                        if category_idx in category_count:
-                            category_count[category_idx] += 1
-                        else:
-                            category_count[category_idx] = 1
+    with col1:
+        st.image(annotated_img, channels='BGR', caption="Resultado con anotaciones")
 
-                    data = []
-                    for category, count in category_count.items():
-                        label = label_names[category]
-                        confidence = scores[categories == category].mean().item() if len(scores) > 0 else 0
-                        data.append({
-                            "Categoría": label,
-                            "Cantidad": count,
-                            "Confianza promedio": f"{confidence:.2f}"
-                        })
+        # Opción de descarga
+        retval, buffer = cv2.imencode('.jpg', annotated_img)
+        st.download_button("📥 Descargar imagen con anotaciones", buffer.tobytes(), file_name="resultado.jpg", mime="image/jpeg")
 
-                    if data:
-                        df = pd.DataFrame(data)
-                        st.dataframe(df, use_container_width=True)
-                        st.bar_chart(df.set_index('Categoría')['Cantidad'])
-                    else:
-                        st.info("No se detectaron objetos con los parámetros actuales.")
-                        st.caption("Prueba a reducir el umbral de confianza en la barra lateral.")
-            except Exception as e:
-                st.error(f"Error al procesar los resultados: {str(e)}")
-                st.stop()
-else:
-    st.error("No se pudo cargar el modelo. Por favor verifica las dependencias e inténtalo nuevamente.")
-    st.stop()
+    with col2:
+        st.subheader("📊 Detalles de detección")
+        df_data = []
+        for i, label in enumerate(filtered_labels):
+            df_data.append({
+                "Etiqueta": label,
+                "Confianza": f"{filtered_scores[i]:.2f}"
+            })
 
-# Pie de página
+        df = pd.DataFrame(df_data)
+        st.dataframe(df, use_container_width=True)
+
+        if export_csv:
+            csv = df.to_csv(index=False).encode("utf-8")
+            st.download_button("📤 Exportar CSV", csv, file_name="detecciones.csv", mime="text/csv")
+
+        # Histograma de confianza
+        st.bar_chart(df["Confianza"].astype(float))
+
+# Footer
 st.markdown("---")
-st.caption("Desarrollado con Streamlit y PyTorch utilizando YOLOv5.")
+st.caption("Desarrollado por [Tu Nombre] • YOLOv5 + Streamlit • 2025")
